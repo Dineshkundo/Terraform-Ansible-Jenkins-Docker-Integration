@@ -1,0 +1,208 @@
+############
+Not a good way to setup ansible automation using terraform
+###########
+After setup need to do modification
+Note:--
+#eg:- We need to copy the id_rsa.pub (public key to copy ===>> worker node in authorized_keys)
+1)root@master:~# cd .ssh/
+root@master:~/.ssh# ll
+total 24
+drwx------ 2 root root 4096 Jun  1 04:30 ./
+drwx------ 5 root root 4096 Jun  1 04:30 ../
+-rw------- 1 root root  600 Jun  1 04:28 authorized_keys
+-rw------- 1 root root 1811 Jun  1 04:29 id_rsa
+-rw-r--r-- 1 root root  393 Jun  1 04:29 id_rsa.pub
+-rw-r--r-- 1 root root  222 Jun  1 04:30 known_hosts
+root@master:~/.ssh# cat id_rsa.pub 
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCpnEPDbKYJFqV5zW1KCMYiviruYGDval+uJF36XZLZLKUo2WNR1uyXGWnfHzmowKCB7hdWfuhCxYJ/LAwNQJD0N6eyvKyF+1ZkxtNY9nOflq5i3K6YHrKCfSh8XyFQyzek6R9WP2sIBp7RnJ1EF6UCThAMgkKqbHEZ+kGS6K07YMgQSmOySeoxIuBooLUqokAXNS1JqhMucJgBXhxCNsnFd8Rtzd5ElsNovAMkA/XGoWvQtlj+JXKFt5VotuSjB8M6Zga2/fwT4bhg8mR3HkXHAAMsRyNaY0IYE6s4olqtHPCO8upl8q5x0yEPmOjFFd1izF4oljH6r5kx7OKfYUc9 root@master
+root@master:~/.ssh# systemctl restart sshd
+root@master:~/.ssh# ansible all -m ping
+----------------------------
+for worker node modification
+----------------------------
+root@worker:~/.ssh# vi authorized_keys 
+root@worker:~/.ssh# sudo systemctl restart sshd
+root@worker:~/.ssh# systemctl restart sshd
+root@worker:~/.ssh# systemctl status sshd
+###########################################
+
+
+provider "google" {
+  project     = "lasya-ganta-14"
+  region      = "us-east1"
+  credentials = file("keys.json")
+}
+
+resource "google_compute_network" "jenkins_network" {
+  name                    = "dkjenkins"
+  auto_create_subnetworks = false
+}
+
+resource "google_compute_subnetwork" "jenkins_subnet" {
+  name          = "jenkins-subnetdk"
+  region        = "us-east1"
+  network       = google_compute_network.jenkins_network.self_link
+  ip_cidr_range = "10.0.1.0/24"
+}
+
+resource "google_compute_firewall" "jenkins_firewall" {
+  name    = "jenkins-firewalldk"
+  network = google_compute_network.jenkins_network.self_link
+
+  allow {
+    protocol = "tcp"
+    ports    = ["8080", "80", "443", "22"]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["dkjenkins"]
+}
+
+resource "google_compute_instance" "jenkins_server" {
+  name         = "jenkins-server-1"
+  machine_type = "e2-medium"
+  zone         = "us-east1-d"
+
+  boot_disk {
+    auto_delete = true
+
+    initialize_params {
+      image = "projects/ubuntu-os-cloud/global/images/ubuntu-2004-focal-v20240519"
+      size  = 10
+      type  = "pd-standard"
+    }
+  }
+
+  network_interface {
+    network    = google_compute_network.jenkins_network.self_link
+    subnetwork = google_compute_subnetwork.jenkins_subnet.self_link
+    access_config {
+      network_tier = "PREMIUM"
+    }
+  }
+
+  metadata_startup_script = <<-SCRIPT
+    #!/bin/bash
+    sudo apt-get update
+    sudo apt-get install -y openssh-server
+    sudo hostnamectl set-hostname worker
+    echo 'root:${var.slave_password}' | sudo chpasswd
+    sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+    sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    # Modify /etc/ssh/sshd_configcd t
+    sudo sed -i '39s/^#//' /etc/ssh/sshd_config
+    sudo sed -i '42s/^#//' /etc/ssh/sshd_config
+    sudo systemctl restart sshd
+    SCRIPT
+
+  service_account {
+    email  = "default"
+    scopes = [
+      "https://www.googleapis.com/auth/devstorage.read_only",
+      "https://www.googleapis.com/auth/logging.write",
+      "https://www.googleapis.com/auth/monitoring.write",
+      "https://www.googleapis.com/auth/service.management.readonly",
+      "https://www.googleapis.com/auth/servicecontrol",
+      "https://www.googleapis.com/auth/trace.append"
+    ]
+  }
+
+  tags = ["http-server", "https-server", "dkjenkins"]
+
+  shielded_instance_config {
+    enable_integrity_monitoring = true
+    enable_secure_boot          = false
+    enable_vtpm                 = true
+  }
+
+  scheduling {
+    automatic_restart   = true
+    on_host_maintenance = "MIGRATE"
+    preemptible         = false
+  }
+
+}
+
+resource "google_compute_instance" "master_instance" {
+  name         = "master-instance"
+  machine_type = "e2-medium"
+  zone         = "us-east1-d"
+
+  boot_disk {
+    auto_delete = true
+
+    initialize_params {
+      image = "projects/ubuntu-os-cloud/global/images/ubuntu-2004-focal-v20240519"
+      size  = 10
+      type  = "pd-standard"
+    }
+  }
+
+  network_interface {
+    network    = google_compute_network.jenkins_network.self_link
+    subnetwork = google_compute_subnetwork.jenkins_subnet.self_link
+    access_config {
+      network_tier = "PREMIUM"
+    }
+  }
+
+  metadata_startup_script = <<-SCRIPT
+    #!/bin/bash
+    sudo apt-get update
+    sudo apt-get install -y openssh-server ansible
+    sudo hostnamectl set-hostname master
+    echo 'root:${var.master_password}' | sudo chpasswd
+    sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+    sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    sudo systemctl restart sshd
+    # Modify /etc/ansible/ansible.cfg
+    sudo sed -i '14s/^#//' /etc/ansible/ansible.cfg
+    sudo sed -i '22s/^#//' /etc/ansible/ansible.cfg
+ 
+    # Add slave instance to Ansible inventory
+    echo -e "[dev]\n${google_compute_instance.jenkins_server.network_interface.0.network_ip}" | sudo tee -a /etc/ansible/hosts
+ 
+    # Generate SSH key pair
+    ssh-keygen -t rsa -b 2048 -f /root/.ssh/id_rsa -N ""
+ 
+    # Copy public key to slave instance
+    sshpass -p "${var.master_password}" ssh-copy-id -o StrictHostKeyChecking=no root@${google_compute_instance.jenkins_server.network_interface.0.network_ip}
+  SCRIPT
+
+  service_account {
+    email  = "default"
+    scopes = [
+      "https://www.googleapis.com/auth/devstorage.read_only",
+      "https://www.googleapis.com/auth/logging.write",
+      "https://www.googleapis.com/auth/monitoring.write",
+      "https://www.googleapis.com/auth/service.management.readonly",
+      "https://www.googleapis.com/auth/servicecontrol",
+      "https://www.googleapis.com/auth/trace.append"
+    ]
+  }
+
+  tags = ["http-server", "https-server", "dkjenkins"]
+
+  shielded_instance_config {
+    enable_integrity_monitoring = true
+    enable_secure_boot          = false
+    enable_vtpm                 = true
+  }
+
+  scheduling {
+    automatic_restart   = true
+    on_host_maintenance = "MIGRATE"
+    preemptible         = false
+  }
+}
+
+variable "master_password" {
+  description = "root"
+  type        = string
+  sensitive   = true
+}
+  variable "slave_password" {
+  description = "root"
+  type        = string
+  sensitive   = true
+}
