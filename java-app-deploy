@@ -1,0 +1,56 @@
+pipeline {
+    agent {
+        label 'docker'
+    }
+    tools {
+        maven 'maven' // Use the name configured in Jenkins
+    }
+
+    stages {
+        stage('checkout') {
+            steps {
+                git 'https://github.com/SaravanaNani/jenkins-java-project.git'
+            }
+        }
+        stage('package') {
+            steps {
+                sh '''
+                cd /var/lib/jenkins/workspace/adq-java-app/
+                mvn clean package
+                '''                
+            }
+        }
+        
+        stage('storage') {
+            steps {
+                googleStorageUpload bucket: 'gs://java-war-storage', credentialsId: 'svc-json-key', pattern: 'target/*.war'
+            }
+        }
+        stage('User Confirmation') {
+            steps {
+                input message: 'Are you sure you want to proceed with the deployment?', ok: 'Yes'
+            }
+        }       
+        stage('Copying war') {
+            steps {
+                sh '''
+                /google-cloud-sdk/bin/gsutil cp gs://java-war-storage/target/NETFLIX-1.2.2.war .
+                ls -al
+                '''
+            }
+        }
+        stage('deploy') {
+            steps {
+                deploy adapters: [
+                    tomcat9(
+                        credentialsId: 'tomcat',
+                        path: '',
+                        url: 'http://34.148.201.109:8080/'
+                    )
+                ],
+                contextPath: 'netflix',
+                war: '**/NETFLIX-1.2.2.war'
+            }
+        }       
+    }
+}
